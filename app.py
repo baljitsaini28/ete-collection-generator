@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import cgi
-import io
 import math
 import os
 import tempfile
 import uuid
 from collections import defaultdict
+from email import policy
+from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -394,6 +394,30 @@ HTML = """<!doctype html>
 
 
 class Handler(BaseHTTPRequestHandler):
+    def parse_uploads(self):
+        content_type = self.headers.get("Content-Type", "")
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length)
+        message = BytesParser(policy=policy.default).parsebytes(
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + body
+        )
+        uploads = {}
+        if not message.is_multipart():
+            return uploads
+        for part in message.iter_parts():
+            disposition = part.get("Content-Disposition", "")
+            if "form-data" not in disposition:
+                continue
+            name = part.get_param("name", header="content-disposition")
+            filename = part.get_filename()
+            if not name:
+                continue
+            uploads[name] = {
+                "filename": filename or "",
+                "data": part.get_payload(decode=True) or b"",
+            }
+        return uploads
+
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
             self.send_response(HTTPStatus.OK)
@@ -409,24 +433,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type"),
-            })
-            grid_item = form["grid"] if "grid" in form else None
-            template_item = form["template"] if "template" in form else None
-            if grid_item is None or not grid_item.filename:
+            uploads = self.parse_uploads()
+            grid_item = uploads.get("grid")
+            template_item = uploads.get("template")
+            if grid_item is None or not grid_item["filename"]:
                 raise ValueError("Please select the grid .xlsx file.")
 
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
-                grid_path = tmp_path / Path(grid_item.filename).name
-                grid_path.write_bytes(grid_item.file.read())
+                grid_path = tmp_path / Path(grid_item["filename"]).name
+                grid_path.write_bytes(grid_item["data"])
 
                 template_path = None
-                if template_item is not None and template_item.filename:
-                    template_path = tmp_path / Path(template_item.filename).name
-                    template_path.write_bytes(template_item.file.read())
+                if template_item is not None and template_item["filename"]:
+                    template_path = tmp_path / Path(template_item["filename"]).name
+                    template_path.write_bytes(template_item["data"])
 
                 output_path = build_output(grid_path, template_path)
 
